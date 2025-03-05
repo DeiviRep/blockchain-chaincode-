@@ -1,0 +1,17 @@
+{
+  "name": "trazabilidad",
+  "version": "1.0.0",
+  "description": "Chaincode para trazabilidad de dispositivos electrónicos",
+  "main": "index.js",
+  "engines": {
+    "node": ">=12",
+    "npm": ">=6"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fabric-contract-api": "^2.5.0",
+    "fabric-shim": "^2.5.0"
+  }
+}
