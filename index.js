@@ -22,7 +22,9 @@ class ChaincodeWrapper {
             const result = await this.contract[method]({ stub }, ...args);
             return shim.success(Buffer.from(result || ''));
         } catch (err) {
-            return shim.error(Buffer.from(err.message));
+            // Devolver el error como un éxito con un mensaje JSON
+            const errorResponse = JSON.stringify({ error: err.message || 'Error desconocido' });
+            return shim.success(Buffer.from(errorResponse));
         }
     }
 }
