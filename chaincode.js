@@ -19,7 +19,16 @@ class TrazabilidadCaracteristicas extends Contract {
             origen: origen,
             timestamp: isoTimestamp
         };
+
+        const exists = await ctx.stub.getState(id);
+        if (exists && exists.length > 0) {
+            throw new Error(`El dispositivo ${id} ya existe`);
+        }
+
         await ctx.stub.putState(id, Buffer.from(JSON.stringify(dispositivo)));
+        const historyKey = ctx.stub.createCompositeKey('history', [id, isoTimestamp]);
+        await ctx.stub.putState(historyKey, Buffer.from(JSON.stringify(dispositivo)));
+
         return JSON.stringify(dispositivo);
     }
 
@@ -48,7 +57,11 @@ class TrazabilidadCaracteristicas extends Contract {
             origen: origen,
             timestamp: isoTimestamp
         };
+
         await ctx.stub.putState(id, Buffer.from(JSON.stringify(dispositivo)));
+        const historyKey = ctx.stub.createCompositeKey('history', [id, isoTimestamp]);
+        await ctx.stub.putState(historyKey, Buffer.from(JSON.stringify(dispositivo)));
+
         return JSON.stringify(dispositivo);
     }
 
@@ -62,7 +75,9 @@ class TrazabilidadCaracteristicas extends Contract {
             let record;
             try {
                 record = JSON.parse(strValue);
-                dispositivos.push(record);
+                if (!result.value.key.startsWith('history')) {
+                    dispositivos.push(record);
+                }
             } catch (err) {
                 console.log(err);
             }
@@ -91,7 +106,7 @@ class TrazabilidadCaracteristicas extends Contract {
             let record;
             try {
                 record = JSON.parse(strValue);
-                if (record.marca === marca) {
+                if (!result.value.key.startsWith('history') && record.marca === marca) {
                     dispositivos.push(record);
                 }
             } catch (err) {
@@ -101,6 +116,115 @@ class TrazabilidadCaracteristicas extends Contract {
         }
         await iterator.close();
         return JSON.stringify(dispositivos);
+    }
+
+    async obtenerHistorial(ctx, id) {
+        const iterator = await ctx.stub.getStateByPartialCompositeKey('history', [id]);
+        const historial = [];
+
+        let result = await iterator.next();
+        while (!result.done) {
+            const strValue = Buffer.from(result.value.value).toString('utf8');
+            let record;
+            try {
+                record = JSON.parse(strValue);
+                historial.push(record);
+            } catch (err) {
+                console.log(err);
+            }
+            result = await iterator.next();
+        }
+        await iterator.close();
+        return JSON.stringify(historial);
+    }
+
+    async consultarPorRangoDeTiempo(ctx, id, startDate, endDate) {
+        const iterator = await ctx.stub.getStateByPartialCompositeKey('history', [id]);
+        const historial = [];
+
+        let result = await iterator.next();
+        while (!result.done) {
+            const strValue = Buffer.from(result.value.value).toString('utf8');
+            let record;
+            try {
+                record = JSON.parse(strValue);
+                const recordTimestamp = new Date(record.timestamp).getTime();
+                const start = new Date(startDate).getTime();
+                const end = new Date(endDate).getTime();
+                if (recordTimestamp >= start && recordTimestamp <= end) {
+                    historial.push(record);
+                }
+            } catch (err) {
+                console.log(err);
+            }
+            result = await iterator.next();
+        }
+        await iterator.close();
+        return JSON.stringify(historial);
+    }
+
+    async consultarPorOrigen(ctx, origen) {
+        const iterator = await ctx.stub.getStateByRange('', '');
+        const dispositivos = [];
+
+        let result = await iterator.next();
+        while (!result.done) {
+            const strValue = Buffer.from(result.value.value).toString('utf8');
+            let record;
+            try {
+                record = JSON.parse(strValue);
+                if (!result.value.key.startsWith('history') && record.origen === origen) {
+                    dispositivos.push(record);
+                }
+            } catch (err) {
+                console.log(err);
+            }
+            result = await iterator.next();
+        }
+        await iterator.close();
+        return JSON.stringify(dispositivos);
+    }
+
+    async contarPorMarca(ctx) {
+        const iterator = await ctx.stub.getStateByRange('', '');
+        const conteo = {};
+
+        let result = await iterator.next();
+        while (!result.done) {
+            const strValue = Buffer.from(result.value.value).toString('utf8');
+            let record;
+            try {
+                record = JSON.parse(strValue);
+                if (!result.value.key.startsWith('history')) {
+                    conteo[record.marca] = (conteo[record.marca] || 0) + 1;
+                }
+            } catch (err) {
+                console.log(err);
+            }
+            result = await iterator.next();
+        }
+        await iterator.close();
+        return JSON.stringify(conteo);
+    }
+
+    async exportarHistorialCompleto(ctx) {
+        const iterator = await ctx.stub.getStateByPartialCompositeKey('history', []);
+        const historial = [];
+
+        let result = await iterator.next();
+        while (!result.done) {
+            const strValue = Buffer.from(result.value.value).toString('utf8');
+            let record;
+            try {
+                record = JSON.parse(strValue);
+                historial.push(record);
+            } catch (err) {
+                console.log(err);
+            }
+            result = await iterator.next();
+        }
+        await iterator.close();
+        return JSON.stringify(historial);
     }
 }
 
