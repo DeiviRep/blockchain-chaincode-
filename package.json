@@ -11,7 +11,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "fabric-contract-api": "^2.5.0",
+    "fabric-contract-api": "^2.5.8",
     "fabric-shim": "^2.5.0"
   }
 }

@@ -1,7 +1,6 @@
 'use strict';
 
 const shim = require('fabric-shim');
-const { Contract } = require('fabric-contract-api');
 const TrazabilidadCaracteristicas = require('./chaincode.js');
 
 class ChaincodeWrapper {
@@ -10,17 +9,30 @@ class ChaincodeWrapper {
     }
 
     async Init(stub) {
-        return shim.success();
+        console.info('Init invoked');
+        try {
+            if (typeof this.contract.initLedger === 'function') {
+                await this.contract.initLedger({ stub });
+            }
+            return shim.success();
+        } catch (err) {
+            return shim.error(Buffer.from(err.message));
+        }
     }
 
     async Invoke(stub) {
         const ret = stub.getFunctionAndParameters();
         const method = ret.fcn;
-        const args = ret.params;
+        const args = ret.params || [];
+
+        if (!method) {
+            return shim.success(Buffer.from('No function name provided'));
+        }
 
         try {
             const result = await this.contract[method]({ stub }, ...args);
-            return shim.success(Buffer.from(result || ''));
+            const payload = typeof result === 'string' ? result : JSON.stringify(result || {});
+            return shim.success(Buffer.from(payload));
         } catch (err) {
             // Devolver el error como un éxito con un mensaje JSON
             const errorResponse = JSON.stringify({ error: err.message || 'Error desconocido' });
