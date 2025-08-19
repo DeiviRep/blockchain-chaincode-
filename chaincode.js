@@ -1,318 +1,421 @@
 'use strict';
 
 const { Contract } = require('fabric-contract-api');
+const crypto = require('crypto');
 
 class TrazabilidadCaracteristicas extends Contract {
+  // --- Utils ---
+  _validarCoords(latitud, longitud) {
+    const lat = parseFloat(latitud);
+    const lon = parseFloat(longitud);
+    if (isNaN(lat) || lat < -90 || lat > 90 || isNaN(lon) || lon < -180 || lon > 180) {
+      throw new Error('Latitud o longitud inválida');
+    }
+    return { lat, lon };
+  }
 
-    // Util - validación geo
-    _validarCoords(latitud, longitud) {
-        const lat = parseFloat(latitud);
-        const lon = parseFloat(longitud);
-        if (isNaN(lat) || lat < -90 || lat > 90 || isNaN(lon) || lon < -180 || lon > 180) {
-            throw new Error('Latitud o longitud inválida');
-        }
-        return { lat, lon };
+  _parseJSONSafe(str, fallback) {
+    try {
+      if (!str || typeof str !== 'string') return fallback;
+      const v = JSON.parse(str);
+      return v ?? fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  _eventosValidos() {
+    return [
+      'Registro',
+      'Embarque',
+      'Desembarque',
+      'Nacionalización',
+      'Distribución',
+      'ConsumidorFinal'
+    ];
+  }
+
+  _validarTransicionEstado(actual, nuevo) {
+    const transiciones = {
+      Registro: ['Embarque'],
+      Embarque: ['Desembarque'],
+      Desembarque: ['Nacionalización'],
+      Nacionalización: ['Distribución', 'ConsumidorFinal'],
+      Distribución: ['ConsumidorFinal'],
+      ConsumidorFinal: []
+    };
+
+    if (actual && !transiciones[actual]?.includes(nuevo)) {
+      throw new Error(`Transición inválida de ${actual} a ${nuevo}`);
+    }
+  }
+
+  _nowIso(ctx) {
+    const t = ctx.stub.getTxTimestamp();
+    return new Date(t.seconds.low * 1000).toISOString();
+  }
+
+  _generarHashHistorico(dispositivo) {
+    const datosRelevantes = {
+      id: dispositivo.id,
+      modelo: dispositivo.modelo,
+      marca: dispositivo.marca,
+      origenPais: dispositivo.origenPais,
+      estado: dispositivo.estado,
+      timestamp: dispositivo.timestamp,
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(datosRelevantes)).digest('hex');
+  }
+
+  // --- Bootstrap ---
+  async initLedger(ctx) {
+    console.info('Ledger trazabilidad iniciado v3.0');
+    return;
+  }
+
+  // --- Registro inicial ---
+  async registrarDispositivo(
+    ctx,
+    id,
+    modelo,
+    marca,
+    imeiSerial,
+    origenPais,
+    latitud,
+    longitud,
+    evento,           // debe ser 'Registro'
+    uuidLote = '',
+    actor = '',
+    rol = '',
+    urlLote = '',     // NUEVO: se guarda en el dispositivo
+    detallesJSON = '{}',
+    documentosMetaJSON = '[]',
+    documentosCodigoJSON = '{}',
+    documentosHashJSON = '[]'
+  ) {
+    if (!id) throw new Error('Se requiere id');
+    if (evento !== 'Registro') throw new Error("El registro inicial debe tener evento 'Registro'");
+
+    const { lat, lon } = this._validarCoords(latitud, longitud);
+
+    const exists = await ctx.stub.getState(id);
+    if (exists && exists.length > 0) throw new Error(`El dispositivo ${id} ya existe`);
+
+    const detalles = this._parseJSONSafe(detallesJSON, {});
+    const documentosMeta = this._parseJSONSafe(documentosMetaJSON, []);
+    const documentosCodigo = this._parseJSONSafe(documentosCodigoJSON, {});
+    const documentosHash = this._parseJSONSafe(documentosHashJSON, []);
+
+    const timestamp = this._nowIso(ctx);
+    const txId = ctx.stub.getTxID();
+
+    const dispositivo = {
+      id,
+      uuidLote: uuidLote || '',
+      urlLote: urlLote || '',
+      modelo,
+      marca,
+      imeiSerial,
+      origenPais,
+      ubicacion: { lat, lon },
+      estado: evento,
+      evento,
+      detalles, // libre pero mantenemos propiedades específicas abajo
+      documentosMeta,
+      documentosCodigo,
+      documentosHash,
+      actor,
+      rol,
+      txId,
+      timestamp,
+      // propiedades específicas por evento de registro ya están arriba (marca, modelo, etc.)
+      // props de otros eventos se crean vacías para claridad
+      tipoTransporte: undefined,
+      nroContenedor: undefined,
+      puertoSalida: undefined,
+      puertoExtranjero: undefined,
+      integridad: undefined,
+      descripcionIntegridad: undefined,
+      dim: undefined,
+      valorCif: undefined,
+      arancel: undefined,
+      iva: undefined,
+      ice: undefined,
+      totalPagado: undefined,
+      comerciante: undefined,
+      deposito: undefined,
+      tienda: undefined,
+      fechaCompra: undefined,
+      hashHistorico: '',
+    };
+    dispositivo.hashHistorico = this._generarHashHistorico(dispositivo);
+
+    await ctx.stub.putState(id, Buffer.from(JSON.stringify(dispositivo)));
+
+    if (uuidLote) {
+      const compositeKey = ctx.stub.createCompositeKey('lote~id', [uuidLote, id]);
+      await ctx.stub.putState(compositeKey, Buffer.from('\u0000'));
     }
 
-    // Util - eventos válidos (extensible)
-    _eventosValidos() {
-        return [
-            'Registro',
-            'Embarque',
-            'Desembarque',
-            'Nacionalización',
-            'Distribución',
-            'ConsumidorFinal'
-        ];
+    ctx.stub.setEvent('DispositivoRegistrado', Buffer.from(JSON.stringify({ id, evento, actor, rol, txId, timestamp })));
+
+    return JSON.stringify(dispositivo);
+  }
+
+  // ---- Consultar por ID ----
+  async consultarDispositivo(ctx, id) {
+    if (!id) throw new Error('Se requiere id');
+    const buf = await ctx.stub.getState(id);
+    if (!buf || buf.length === 0) throw new Error(`El dispositivo ${id} no existe`);
+    return buf.toString();
+  }
+
+  // --- Actualizar ---
+  // async actualizarDispositivo(
+  //   ctx,
+  //   id,
+  //   modelo,
+  //   marca,
+  //   origenPais,
+  //   latitud,
+  //   longitud,
+  //   evento,
+  //   actor = '',
+  //   rol = '',
+  //   detallesJSON = '{}',
+  //   documentosMetaJSON = '[]',
+  //   documentosCodigoJSON = '{}',
+  //   documentosHashJSON = '[]',
+  //   forceUpdate = 'false'
+  // ) {
+  //   if (!id) throw new Error('Se requiere id');
+  //   const buf = await ctx.stub.getState(id);
+  //   if (!buf || buf.length === 0) throw new Error(`El dispositivo ${id} no existe`);
+
+  //   const anterior = JSON.parse(buf.toString());
+  //   if (!this._eventosValidos().includes(evento)) throw new Error(`Evento inválido: ${evento}`);
+
+  //   this._validarTransicionEstado(anterior.estado, evento);
+  //   this._validarRolPermiso(rol, evento);
+
+  //   const { lat, lon } = this._validarCoords(latitud, longitud);
+  //   const force = forceUpdate === true || forceUpdate === 'true';
+
+  //   if (!force) {
+  //     if ((modelo && modelo !== anterior.modelo) ||
+  //         (marca && marca !== anterior.marca) ||
+  //         (origenPais && origenPais !== anterior.origenPais)) {
+  //       throw new Error('Cambiar modelo/marca/origenPais requiere forceUpdate=true');
+  //     }
+  //   }
+
+  //   const timestamp = this._nowIso(ctx);
+  //   const txId = ctx.stub.getTxID();
+
+  //   const detalles = this._parseJSONSafe(detallesJSON, {});
+  //   const documentosMeta = this._parseJSONSafe(documentosMetaJSON, []);
+  //   const documentosCodigo = this._parseJSONSafe(documentosCodigoJSON, {});
+  //   const documentosHash = this._parseJSONSafe(documentosHashJSON, []);
+
+  //   const actualizado = {
+  //     ...anterior,
+  //     modelo: modelo || anterior.modelo,
+  //     marca: marca || anterior.marca,
+  //     origenPais: origenPais || anterior.origenPais,
+  //     ubicacion: { lat, lon },
+  //     estado: evento,
+  //     evento,
+  //     detalles: Object.keys(detalles).length > 0 ? detalles : anterior.detalles,
+  //     documentosMeta: documentosMeta.length > 0 ? documentosMeta : anterior.documentosMeta,
+  //     documentosCodigo: Object.keys(documentosCodigo).length > 0 ? documentosCodigo : anterior.documentosCodigo,
+  //     documentosHash: documentosHash.length > 0 ? documentosHash : anterior.documentosHash,
+  //     actor,
+  //     rol,
+  //     txId,
+  //     timestamp,
+  //     hashHistorico: ''
+  //   };
+  //   actualizado.hashHistorico = this._generarHashHistorico(actualizado);
+
+  //   await ctx.stub.putState(id, Buffer.from(JSON.stringify(actualizado)));
+
+  //   ctx.stub.setEvent('DispositivoActualizado', Buffer.from(JSON.stringify({ id, evento, actor, rol, txId, timestamp })));
+
+  //   return JSON.stringify(actualizado);
+  // }
+
+  // ---- Actualizar (eventos) ----
+  async actualizarDispositivo(
+    ctx,
+    id,
+    modelo,                 // ignorado salvo forceUpdate (si quisieras, pero ya no lo usamos)
+    marca,
+    origenPais,
+    latitud,
+    longitud,
+    evento,                 // 'Embarque' | 'Desembarque' | 'Nacionalización' | 'Distribución' | 'ConsumidorFinal'
+    actor = '',
+    rol = '',
+    documentosMetaJSON = '[]',
+    documentosCodigoJSON = '{}',
+    documentosHashJSON = '[]',
+    forceUpdate = 'false',
+    detallesJSON = '{}'     // CAMPOS ESPECÍFICOS DEL EVENTO
+  ) {
+    if (!id) throw new Error('Se requiere id');
+    const buf = await ctx.stub.getState(id);
+    if (!buf || buf.length === 0) throw new Error(`El dispositivo ${id} no existe`);
+
+    const anterior = JSON.parse(buf.toString());
+    if (!this._eventosValidos().includes(evento)) throw new Error(`Evento inválido: ${evento}`);
+
+    this._validarTransicionEstado(anterior.estado, evento);
+
+    const { lat, lon } = this._validarCoords(latitud, longitud);
+    const force = forceUpdate === true || forceUpdate === 'true';
+
+    // Ya no permitimos cambiar modelo/marca/origen por aquí (lo ignoramos salvo force)
+    if (!force) {
+      if ((modelo && modelo !== anterior.modelo) ||
+          (marca && marca !== anterior.marca) ||
+          (origenPais && origenPais !== anterior.origenPais)) {
+        throw new Error('Cambiar modelo/marca/origenPais requiere forceUpdate=true');
+      }
     }
 
-    // Inicializa ledger (por compatibilidad)
-    async initLedger(ctx) {
-        console.info('Sistema Ledger de trazabilidad iniciado');
-        return;
+    const timestamp = this._nowIso(ctx);
+    const txId = ctx.stub.getTxID();
+
+    const documentosMeta = this._parseJSONSafe(documentosMetaJSON, []);
+    const documentosCodigo = this._parseJSONSafe(documentosCodigoJSON, {});
+    const documentosHash = this._parseJSONSafe(documentosHashJSON, []);
+    const detalles = this._parseJSONSafe(detallesJSON, {});
+
+    const actualizado = {
+      ...anterior,
+      modelo: modelo || anterior.modelo,
+      marca: marca || anterior.marca,
+      origenPais: origenPais || anterior.origenPais,
+      ubicacion: { lat, lon },
+      estado: evento,
+      evento,
+      documentosMeta: documentosMeta.length > 0 ? documentosMeta : anterior.documentosMeta,
+      documentosCodigo: Object.keys(documentosCodigo).length > 0 ? documentosCodigo : anterior.documentosCodigo,
+      documentosHash: documentosHash.length > 0 ? documentosHash : anterior.documentosHash,
+      actor,
+      rol,
+      txId,
+      timestamp,
+    };
+
+    // Escribir SOLO propiedades específicas del evento actual:
+    switch (evento) {
+      case 'Embarque': {
+        actualizado.tipoTransporte = detalles.tipoTransporte || '';
+        actualizado.nroContenedor = detalles.nroContenedor || '';
+        actualizado.puertoSalida = detalles.puertoSalida || '';
+        break;
+      }
+      case 'Desembarque': {
+        actualizado.puertoExtranjero = detalles.puertoExtranjero || '';
+        // integridad boolean estricta
+        const integ = (typeof detalles.integridad === 'boolean') ? detalles.integridad : false;
+        actualizado.integridad = integ;
+        actualizado.descripcionIntegridad = detalles.descripcionIntegridad || '';
+        break;
+      }
+      case 'Nacionalización': {
+        actualizado.dim = detalles.dim || '';
+        actualizado.valorCif = Number(detalles.valorCif || 0);
+        actualizado.arancel = Number(detalles.arancel || 0);
+        actualizado.iva = Number(detalles.iva || 0);
+        actualizado.ice = Number(detalles.ice || 0);
+        actualizado.totalPagado = Number(detalles.totalPagado || 0);
+        break;
+      }
+      case 'Distribución': {
+        actualizado.comerciante = detalles.comerciante || '';
+        actualizado.deposito = detalles.deposito || '';
+        break;
+      }
+      case 'ConsumidorFinal': {
+        actualizado.tienda = detalles.tienda || '';
+        actualizado.fechaCompra = detalles.fechaCompra || ''; // ISO string
+        break;
+      }
+      default:
+        break;
     }
 
-    /**
-     * registrarDispositivo
-     * Firma extendida (todos los campos opcionales al final):
-     * registrarDispositivo(ctx, id, modelo, marca, origen, latitud, longitud, evento, loteId, actor, rol, documentosJSON, codigoDocumentosJSON, hashDocumentosJSON, urlPublica)
-     *
-     * Nota: documentosJSON, codigoDocumentosJSON, hashDocumentosJSON son opcionales y se aceptan como JSON stringificadas.
-     * Por defecto se almacenan vacíos si no se envían.
-     */
-    async registrarDispositivo(ctx, id, modelo, marca, origen, latitud, longitud, evento, loteId = '', actor = '', rol = '', documentosJSON = '[]', codigoDocumentosJSON = '{}', hashDocumentosJSON = '[]', urlPublica = '') {
-        if (!id) throw new Error('Se requiere id');
+    actualizado.hashHistorico = this._generarHashHistorico(actualizado);
 
-        // Validar coords
-        const { lat, lon } = this._validarCoords(latitud, longitud);
+    await ctx.stub.putState(id, Buffer.from(JSON.stringify(actualizado)));
 
-        // Evento válido
-        const eventosValidos = this._eventosValidos();
-        if (!eventosValidos.includes(evento)) {
-            throw new Error(`Evento inválido. Use uno de: ${eventosValidos.join(', ')}`);
-        }
+    ctx.stub.setEvent('DispositivoActualizado', Buffer.from(JSON.stringify({ id, evento, actor, rol, txId, timestamp })));
 
-        // Timestamps y txId
-        const txId = ctx.stub.getTxID();
-        const timestampProto = ctx.stub.getTxTimestamp();
-        const isoTimestamp = new Date(timestampProto.seconds.low * 1000).toISOString();
+    return JSON.stringify(actualizado);
+  }
 
-        // Generar qrCodeId simple
-        const qrCodeId = `TRZ-${id}-${isoTimestamp.split('.')[0].replace(/[:T-]/g, '')}`;
-
-        // Parsear opcionales con tolerancia
-        let documentos = [];
-        let codigoDocumentos = {};
-        let hashDocumentos = [];
-        console.log("FFFFFFFF")
+  // ---- Historial ----
+  async obtenerHistorial(ctx, id) {
+    if (!id) throw new Error('Se requiere id');
+    const iterator = await ctx.stub.getHistoryForKey(id);
+    const historial = [];
+    let result = await iterator.next();
+    while (!result.done) {
+      if (result.value && result.value.value) {
         try {
-            documentos = JSON.parse(documentosJSON || '[]');
-            if (!Array.isArray(documentos)) documentos = [];
-        } catch (e) {
-            documentos = [];
-        }
+          const parsed = JSON.parse(result.value.value.toString('utf8'));
+          historial.push({
+            txId: result.value.tx_id || parsed.txId,
+            timestamp: parsed.timestamp,
+            evento: parsed.evento,
+            actor: parsed.actor,
+            rol: parsed.rol,
+            estado: parsed.estado,
+            hashHistorico: parsed.hashHistorico,
+            data: parsed,
+          });
+        } catch {}
+      }
+      result = await iterator.next();
+    }
+    await iterator.close();
+    return JSON.stringify(historial);
+  }
+
+  // ---- Listados ----
+  async listarDispositivos(ctx) {
+    const iterator = await ctx.stub.getStateByRange('', '');
+    const dispositivos = [];
+    let result = await iterator.next();
+    while (!result.done) {
+      if (result.value && result.value.key && !result.value.key.includes('~')) {
         try {
-            codigoDocumentos = JSON.parse(codigoDocumentosJSON || '{}');
-            if (typeof codigoDocumentos !== 'object' || Array.isArray(codigoDocumentos)) codigoDocumentos = {};
-        } catch (e) {
-            codigoDocumentos = {};
-        }
-        try {
-            hashDocumentos = JSON.parse(hashDocumentosJSON || '[]');
-            if (!Array.isArray(hashDocumentos)) hashDocumentos = [];
-        } catch (e) {
-            hashDocumentos = [];
-        }
-
-        // Chequear existencia
-        const exists = await ctx.stub.getState(id);
-        if (exists && exists.length > 0) {
-            throw new Error(`El dispositivo ${id} ya existe. Use actualizarDispositivo para añadir eventos.`);
-        }
-
-        // Estado actual (registro inicial)
-        const dispositivo = {
-            id,
-            loteId,
-            modelo,
-            marca,
-            origen,
-            ubicacion: `${lat},${lon}`,
-            evento,
-            qrCodeId,
-            urlPublica: urlPublica || '',
-            documentos,
-            codigoDocumentos,
-            hashDocumentos,
-            actor,
-            rol,
-            txId,
-            timestamp: isoTimestamp
-        };
-
-        // Guardar estado actual
-        await ctx.stub.putState(id, Buffer.from(JSON.stringify(dispositivo)));
-
-        // Índice por lote (si loteId presente)
-        if (loteId && loteId.length > 0) {
-            const compositeKey = ctx.stub.createCompositeKey('lote~id', [loteId, id]);
-            await ctx.stub.putState(compositeKey, Buffer.from('\u0000'));
-        }
-
-        // Emitir evento Fabric
-        ctx.stub.setEvent('DispositivoRegistrado', Buffer.from(JSON.stringify({ id, loteId, evento, actor, rol, txId, timestamp: isoTimestamp })));
-
-        return JSON.stringify(dispositivo);
+          dispositivos.push(JSON.parse(result.value.value.toString('utf8')));
+        } catch {}
+      }
+      result = await iterator.next();
     }
+    await iterator.close();
+    return JSON.stringify(dispositivos);
+  }
 
-        /**
-     * consultarDispositivo
-     * Firma:
-     * consultarDispositivo(ctx, id)
-     *
-     * Devuelve el estado actual (JSON string) del dispositivo o lanza error si no existe.
-     */
-    async consultarDispositivo(ctx, id) {
-        if (!id) throw new Error('Se requiere id');
-        const dispositivoBuf = await ctx.stub.getState(id);
-        if (!dispositivoBuf || dispositivoBuf.length === 0) {
-            throw new Error(`El dispositivo ${id} no existe`);
-        }
-        return dispositivoBuf.toString();
+  async listarPorLote(ctx, uuidLote) {
+    if (!uuidLote) throw new Error('Se requiere uuidLote');
+    const iterator = await ctx.stub.getStateByPartialCompositeKey('lote~id', [uuidLote]);
+    const dispositivos = [];
+    let result = await iterator.next();
+    while (!result.done) {
+      const parsed = ctx.stub.splitCompositeKey(result.value.key);
+      const id = parsed.attributes[1];
+      const buf = await ctx.stub.getState(id);
+      if (buf && buf.length > 0) dispositivos.push(JSON.parse(buf.toString()));
+      result = await iterator.next();
     }
-
-    /**
-     * actualizarDispositivo
-     * Firma:
-     * actualizarDispositivo(ctx, id, modelo, marca, origen, latitud, longitud, evento, actor, rol, documentosJSON, codigoDocumentosJSON, hashDocumentosJSON, urlPublica, forceUpdate)
-     *
-     * forceUpdate: 'true'|'false' (string) o booleano
-     */
-    async actualizarDispositivo(ctx, id, modelo, marca, origen, latitud, longitud, evento, actor = '', rol = '', documentosJSON = '[]', codigoDocumentosJSON = '{}', hashDocumentosJSON = '[]', urlPublica = '', forceUpdate = 'false') {
-        if (!id) throw new Error('Se requiere id');
-        const existsBuf = await ctx.stub.getState(id);
-        if (!existsBuf || existsBuf.length === 0) {
-            throw new Error(`El dispositivo ${id} no existe`);
-        }
-
-        const eventosValidos = this._eventosValidos();
-        if (!eventosValidos.includes(evento)) {
-            throw new Error(`Evento inválido. Use uno de: ${eventosValidos.join(', ')}`);
-        }
-
-        const { lat, lon } = this._validarCoords(latitud, longitud);
-
-        const timestampProto = ctx.stub.getTxTimestamp();
-        const isoTimestamp = new Date(timestampProto.seconds.low * 1000).toISOString();
-        const txId = ctx.stub.getTxID();
-
-        // Mantener qrCodeId original y loteId
-        const dispositivoAnterior = JSON.parse(existsBuf.toString());
-        const qrCodeId = dispositivoAnterior.qrCodeId || `TRZ-${id}-${isoTimestamp.split('.')[0].replace(/[:T-]/g, '')}`;
-        const loteId = dispositivoAnterior.loteId || '';
-
-        // Parsear opcionales con tolerancia
-        let documentos = [];
-        let codigoDocumentos = {};
-        let hashDocumentos = [];
-        try {
-            documentos = JSON.parse(documentosJSON || '[]');
-            if (!Array.isArray(documentos)) documentos = [];
-        } catch (e) {
-            documentos = [];
-        }
-        try {
-            codigoDocumentos = JSON.parse(codigoDocumentosJSON || '{}');
-            if (typeof codigoDocumentos !== 'object' || Array.isArray(codigoDocumentos)) codigoDocumentos = {};
-        } catch (e) {
-            codigoDocumentos = {};
-        }
-        try {
-            hashDocumentos = JSON.parse(hashDocumentosJSON || '[]');
-            if (!Array.isArray(hashDocumentos)) hashDocumentos = [];
-        } catch (e) {
-            hashDocumentos = [];
-        }
-
-        // Prevención de cambios no autorizados a características principales
-        const force = (forceUpdate === 'true' || forceUpdate === true);
-        if (!force) {
-            if ((modelo && modelo !== dispositivoAnterior.modelo) ||
-                (marca && marca !== dispositivoAnterior.marca) ||
-                (origen && origen !== dispositivoAnterior.origen)) {
-                throw new Error('Para cambiar modelo/marca/origen se necesita forceUpdate=true y autorización administrativa.');
-            }
-        }
-
-        const dispositivo = {
-            id,
-            loteId,
-            modelo: modelo || dispositivoAnterior.modelo,
-            marca: marca || dispositivoAnterior.marca,
-            origen: origen || dispositivoAnterior.origen,
-            ubicacion: `${lat},${lon}`,
-            evento,
-            qrCodeId,
-            urlPublica: urlPublica || dispositivoAnterior.urlPublica || '',
-            documentos: documentos.length > 0 ? documentos : dispositivoAnterior.documentos || [],
-            codigoDocumentos: Object.keys(codigoDocumentos).length > 0 ? codigoDocumentos : (dispositivoAnterior.codigoDocumentos || {}),
-            hashDocumentos: hashDocumentos.length > 0 ? hashDocumentos : (dispositivoAnterior.hashDocumentos || []),
-            actor,
-            rol,
-            txId,
-            timestamp: isoTimestamp
-        };
-
-        await ctx.stub.putState(id, Buffer.from(JSON.stringify(dispositivo)));
-
-        // Emitir evento Fabric para backend
-        ctx.stub.setEvent('DispositivoActualizado', Buffer.from(JSON.stringify({ id, loteId, evento, actor, rol, txId, timestamp: isoTimestamp })));
-
-        return JSON.stringify(dispositivo);
-    }
-
-    // Obtener historial enriquecido
-    async obtenerHistorial(ctx, id) {
-        if (!id) throw new Error('Se requiere id');
-        const iterator = await ctx.stub.getHistoryForKey(id);
-        const historial = [];
-
-        let result = await iterator.next();
-        while (!result.done) {
-            if (result.value && result.value.value) {
-                try {
-                    const raw = result.value.value.toString('utf8');
-                    const parsed = JSON.parse(raw);
-                    historial.push({
-                        txId: result.value.tx_id || parsed.txId || null,
-                        timestamp: parsed.timestamp || null,
-                        actor: parsed.actor || null,
-                        rol: parsed.rol || null,
-                        evento: parsed.evento || null,
-                        data: parsed
-                    });
-                } catch (err) {
-                    // ignorar valores no JSON
-                }
-            }
-            result = await iterator.next();
-        }
-        await iterator.close();
-        return JSON.stringify(historial);
-    }
-
-    // Listar todos los dispositivos (estado actual). Omite composite keys
-    async listarDispositivos(ctx) {
-        const iterator = await ctx.stub.getStateByRange('', '');
-        const dispositivos = [];
-
-        let result = await iterator.next();
-        while (!result.done) {
-            if (result.value && result.value.key) {
-                // Ignorar entradas de índice (composite keys contienen "~")
-                if (!result.value.key.includes('lote~id')) {
-                    try {
-                        const strValue = result.value.value.toString('utf8');
-                        const record = JSON.parse(strValue);
-                        dispositivos.push(record);
-                    } catch (err) {
-                        // no-json, ignorar
-                    }
-                }
-            }
-            result = await iterator.next();
-        }
-        await iterator.close();
-        return JSON.stringify(dispositivos);
-    }
-
-    // Listar dispositivos por lote usando composite key
-    async listarPorLote(ctx, loteId) {
-        if (!loteId) throw new Error('Se requiere loteId');
-        const iterator = await ctx.stub.getStateByPartialCompositeKey('lote~id', [loteId]);
-        const dispositivos = [];
-
-        let result = await iterator.next();
-        while (!result.done) {
-            if (result.value && result.value.key) {
-                // compositeKey -> parse to extract id
-                try {
-                    const parsed = ctx.stub.splitCompositeKey(result.value.key);
-                    const id = parsed.attributes[1];
-                    const deviceBuf = await ctx.stub.getState(id);
-                    if (deviceBuf && deviceBuf.length > 0) {
-                        dispositivos.push(JSON.parse(deviceBuf.toString()));
-                    }
-                } catch (err) {
-                    // ignorar
-                }
-            }
-            result = await iterator.next();
-        }
-        await iterator.close();
-        return JSON.stringify(dispositivos);
-    }
-
+    await iterator.close();
+    return JSON.stringify(dispositivos);
+  }
 }
 
 module.exports = TrazabilidadCaracteristicas;
