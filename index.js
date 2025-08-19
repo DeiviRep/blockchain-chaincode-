@@ -16,7 +16,7 @@ class ChaincodeWrapper {
             }
             return shim.success();
         } catch (err) {
-            return shim.error(Buffer.from(err.message));
+            return shim.error(err.message);
         }
     }
 
@@ -34,9 +34,8 @@ class ChaincodeWrapper {
             const payload = typeof result === 'string' ? result : JSON.stringify(result || {});
             return shim.success(Buffer.from(payload));
         } catch (err) {
-            // Devolver el error como un éxito con un mensaje JSON
-            const errorResponse = JSON.stringify({ error: err.message || 'Error desconocido' });
-            return shim.success(Buffer.from(errorResponse));
+            const errorResponse = err.message || 'Error desconocido';
+            return shim.error(errorResponse);
         }
     }
 }
