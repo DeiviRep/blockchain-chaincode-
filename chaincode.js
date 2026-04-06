@@ -87,15 +87,18 @@ class DataProcessors {
         if (datos.puntoControl)   r.puntoControl   = datos.puntoControl;
         if (datos.contenedor)     r.contenedor     = datos.contenedor;
         if (datos.tipoTransporte) r.tipoTransporte = datos.tipoTransporte;
+        if (datos.blAwb)          r.blAwb          = datos.blAwb;
         break;
       case ESTADOS.DESEMBARCADO:
-        if (datos.puntoControl)            r.puntoControl            = datos.puntoControl;
-        if (datos.integridad !== undefined) r.integridad             = datos.integridad;
-        if (datos.descripcionIntegridad)   r.descripcionIntegridad   = datos.descripcionIntegridad;
+        if (datos.puntoControl)            r.puntoControl          = datos.puntoControl;
+        if (datos.integridad !== undefined) r.integridad            = datos.integridad;
+        if (datos.descripcionIntegridad)   r.descripcionIntegridad = datos.descripcionIntegridad;
+        if (datos.documentoTransito)       r.documentoTransito     = datos.documentoTransito;
         break;
       case ESTADOS.NACIONALIZADO:
         if (datos.puntoControl) r.puntoControl = datos.puntoControl;
         if (datos.dim)          r.dim          = datos.dim;
+        if (datos.dam)          r.dam          = datos.dam;
         if (datos.valorCIF)     r.valorCIF     = parseFloat(datos.valorCIF);
         if (datos.totalPagado)  r.totalPagado  = parseFloat(datos.totalPagado);
         if (datos.arancel)      r.arancel      = parseFloat(datos.arancel);
@@ -105,6 +108,7 @@ class DataProcessors {
       case ESTADOS.EN_DISTRIBUCION:
         if (datos.puntoControl) r.puntoControl = datos.puntoControl;
         if (datos.comerciante)  r.comerciante  = datos.comerciante;
+        if (datos.responsable)  r.responsable  = datos.responsable;
         if (datos.deposito)     r.deposito     = datos.deposito;
         break;
       case ESTADOS.PRODUCTO_ADQUIRIDO:
@@ -247,7 +251,7 @@ class DatabaseAccess {
 class ProductoService {
   constructor(dbAccess) { this.db = dbAccess; }
 
-  async registrarProducto(productoId, lote, uuidLote, marca, modelo, imeiSerial, puntoControl, latitud, longitud, urlLote = '') {
+  async registrarProducto(productoId, lote, uuidLote, marca, modelo, imeiSerial, paisOrigen, puntoControl, latitud, longitud, urlLote = '') {
     if (await this.db.existeProducto(productoId)) {
       throw new Error(`El producto ${productoId} ya existe`);
     }
@@ -257,6 +261,7 @@ class ProductoService {
 
     const nuevoProducto = {
       lote, uuidLote, id: productoId, marca, modelo, imeiSerial,
+      paisOrigen:    paisOrigen || '',
       estado:        ESTADOS.REGISTRADO,
       urlLote:       urlLote || `trazabilidad.io/lote/${uuidLote}`,
       fechaCreacion: Utils.getTxTimestamp(this.db.ctx),
@@ -323,12 +328,22 @@ class ConsultaService {
   async obtenerActividadReciente(limite = 10) {
     const todos   = await this.db.listarTodosLosProductos();
     const eventos = [];
+  
     todos.forEach(p => {
-      p.eventos.forEach(ev => eventos.push({
-        ...ev, productoId: p.id, lote: p.lote,
-        marca: p.marca, modelo: p.modelo, imeiSerial: p.imeiSerial
-      }));
+      if (p.eventos && p.eventos.length > 0) {
+        const ultimoEvento = p.eventos[p.eventos.length - 1];
+      
+        eventos.push({
+          ...ultimoEvento,
+          productoId: p.id,
+          lote: p.lote,
+          marca: p.marca,
+          modelo: p.modelo,
+          imeiSerial: p.imeiSerial
+        });
+      }
     });
+  
     eventos.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
     return eventos.slice(0, parseInt(limite));
   }
@@ -346,10 +361,10 @@ class TrazabilidadContract extends Contract {
 
   // --- Productos ---
 
-  async registrarProducto(ctx, productoId, lote, uuidLote, marca, modelo, imeiSerial, puntoControl, latitud, longitud, urlLote = '') {
+  async registrarProducto(ctx, productoId, lote, uuidLote, marca, modelo, imeiSerial, paisOrigen, puntoControl, latitud, longitud, urlLote = '') {
     const db      = new DatabaseAccess(ctx);
     const service = new ProductoService(db);
-    const nuevo   = await service.registrarProducto(productoId, lote, uuidLote, marca, modelo, imeiSerial, puntoControl, latitud, longitud, urlLote);
+    const nuevo   = await service.registrarProducto(productoId, lote, uuidLote, marca, modelo, imeiSerial, paisOrigen, puntoControl, latitud, longitud, urlLote);
 
     ctx.stub.setEvent('ProductoRegistrado', Buffer.from(JSON.stringify({
       productoId, lote, uuidLote, imeiSerial, timestamp: nuevo.fechaCreacion
