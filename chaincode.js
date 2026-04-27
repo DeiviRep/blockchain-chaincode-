@@ -193,7 +193,7 @@ class DatabaseAccess {
       result = await iterator.next();
     }
     await iterator.close();
-    return productos;
+    return productos.sort((a, b) => new Date(b.fechaCreacion) - new Date(a.fechaCreacion));
   }
 
   async listarProductosPorLote(uuidLote) {
@@ -208,7 +208,7 @@ class DatabaseAccess {
       result = await iterator.next();
     }
     await iterator.close();
-    return productos;
+    return productos.sort((a, b) => new Date(b.fechaCreacion) - new Date(a.fechaCreacion));
   }
 
   async buscarPorImei(imei) {
